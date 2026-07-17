@@ -68,9 +68,6 @@ import matplotlib.ticker as ticker
 from matplotlib.lines import Line2D
 
 
-# PUBLICATION STYLE CONFIGURATION
-# IEEE / AIAA journal standard: white background, black text, serif font,
-# distinguishable line styles rather than color differences.
 
 matplotlib.rcParams.update({
     # Canvas
@@ -163,7 +160,11 @@ T_MAX = 3.0     # simulate 3 s — full landing and settlement
 
 # CORE SIMULATION FUNCTION
 
-def simulate(mass, velocity, attitude_deg, surface, spring_k, c_passive, use_mr):
+def simulate(mass, velocity, attitude_deg, surface, spring_k, c_passive, use_mr,
+             c_fixed_override=None, dt=None):   # [FIX 3 / R10] optional fixed-c sweep + timestep
+
+    if dt is None:
+        dt = DT
 
     theta          = np.radians(attitude_deg)
     v0             = velocity * np.cos(theta)
@@ -174,14 +175,19 @@ def simulate(mass, velocity, attitude_deg, surface, spring_k, c_passive, use_mr)
     k_eff    = (spring_k * k_ground) / (spring_k + k_ground)
 
     c_crit = 2.0 * np.sqrt(k_eff * mass)
-    c_min  = c_passive
+    c_min  = 500.0           # [FIX 2] field-off rebound state, matches paper Methods
+                             #         (was c_passive; that was inconsistent with the
+                             #          paper's stated c_min = 500 N·s/m)
     c_max  = c_crit * 0.85
+
+    g        = 9.81                    # [FIX 5] gravitational acceleration (m/s^2)
+    x_static = mass * g / k_eff        # [FIX 5] gravity-loaded landed equilibrium
 
     x   = 0.0
     vel = v0
 
     times, forces, disps = [], [], []
-    spring_forces = []       # NEW: track spring force separately for publication
+    spring_forces = []     
 
     peak_spring = 0.0
     peak_total  = 0.0
@@ -189,13 +195,15 @@ def simulate(mass, velocity, attitude_deg, surface, spring_k, c_passive, use_mr)
     settle_time = T_MAX
     settled     = False
 
-    n_steps = int(T_MAX / DT)
+    n_steps = int(T_MAX / dt)
 
     for i in range(n_steps + 1):
-        t = i * DT
+        t = i * dt
 
         # Skyhook control law
-        if use_mr:
+        if c_fixed_override is not None:            # [FIX 3] fixed passive sweep
+            c = c_fixed_override
+        elif use_mr:
             c = c_max if vel >= 0 else c_min
             if attitude_deg > 5:
                 c = min(c_max, c * (1.0 + lateral_factor * 0.4))
@@ -212,21 +220,21 @@ def simulate(mass, velocity, attitude_deg, surface, spring_k, c_passive, use_mr)
 
         def deriv(xi, vi):
             xi = max(0.0, xi)
-            return vi, -(k_eff * xi + c * vi) / mass
+            return vi, (-(k_eff * xi + c * vi) / mass) + g   # [FIX 5] + gravity
 
         dx1, dv1 = deriv(x, vel)
-        dx2, dv2 = deriv(x + 0.5*DT*dx1, vel + 0.5*DT*dv1)
-        dx3, dv3 = deriv(x + 0.5*DT*dx2, vel + 0.5*DT*dv2)
-        dx4, dv4 = deriv(x + DT*dx3,     vel + DT*dv3)
+        dx2, dv2 = deriv(x + 0.5*dt*dx1, vel + 0.5*dt*dv1)
+        dx3, dv3 = deriv(x + 0.5*dt*dx2, vel + 0.5*dt*dv2)
+        dx4, dv4 = deriv(x + dt*dx3,     vel + dt*dv3)
 
-        vel += (DT / 6.0) * (dv1 + 2*dv2 + 2*dv3 + dv4)
-        x   += (DT / 6.0) * (dx1 + 2*dx2 + 2*dx3 + dx4)
+        vel += (dt / 6.0) * (dv1 + 2*dv2 + 2*dv3 + dv4)
+        x   += (dt / 6.0) * (dx1 + 2*dx2 + 2*dx3 + dx4)
 
         x = max(0.0, x)
         if x == 0.0 and vel < 0:
             vel = 0.0
 
-        if not settled and t > 0.1 and abs(vel) < 0.01 and abs(x) < 0.001:
+        if not settled and t > 0.1 and abs(vel) < 0.01 and abs(x - x_static) < 0.001:  # [FIX 5] vs equilibrium
             settle_time = t
             settled     = True
 
@@ -243,6 +251,8 @@ def simulate(mass, velocity, attitude_deg, surface, spring_k, c_passive, use_mr)
         'peak_total':    peak_total  / 1000,
         'peak_disp':     peak_disp   * 100,
         'settle_time':   settle_time,
+        'x_static_cm':   x_static    * 100,          # [FIX 5]
+        'k_eff':         k_eff,
         'times':         np.array(times),
         'forces':        np.array(forces),
         'disps':         np.array(disps),
@@ -638,3 +648,139 @@ if __name__ == '__main__':
     print("\nDone. Files saved:")
     print("    result_Nominal_Landing.png       (300 dpi, 4-panel)")
     print("    result_all_scenarios.png         (300 dpi, 3-panel + table)")
+
+
+
+def _rk4_free(mass, k, c, x0, v0, dt, t_max):
+    # bare linear-oscillator RK4 (no gravity/clamp) for closed-form comparison
+    x, vel = x0, v0
+    n = int(t_max / dt)
+    xs = np.empty(n+1); vs = np.empty(n+1); ts = np.empty(n+1)
+    for i in range(n+1):
+        ts[i], xs[i], vs[i] = i*dt, x, vel
+        def d(xi, vi): return vi, -(k*xi + c*vi) / mass
+        a1, b1 = d(x, vel)
+        a2, b2 = d(x+0.5*dt*a1, vel+0.5*dt*b1)
+        a3, b3 = d(x+0.5*dt*a2, vel+0.5*dt*b2)
+        a4, b4 = d(x+dt*a3,     vel+dt*b3)
+        vel += (dt/6)*(b1+2*b2+2*b3+b4)
+        x   += (dt/6)*(a1+2*a2+2*a3+a4)
+    return ts, xs, vs
+
+
+def run_validation():
+    sk, surf = 150000.0, 'medium'
+    kg = SURFACE_K[surf]
+    m, k = 5000.0, (sk*kg)/(sk+kg)        #
+    wn, x0 = np.sqrt(k/m), 0.1
+
+    print("=" * 62)
+    print("  VALIDATION (analytical solutions + convergence)")
+    print("=" * 62)
+
+    ts, xs, vs = _rk4_free(m, k, 0.0, x0, 0.0, DT, 2.0)
+    e1 = np.max(np.abs(xs - x0*np.cos(wn*ts)))
+    print(f"  V1 undamped vs cos(wn t) : err {e1:.2e} m  [{'PASS' if e1<1e-4 else 'FAIL'}]")
+
+    E = 0.5*m*vs**2 + 0.5*k*xs**2
+    d2 = np.max(np.abs(E - 0.5*k*x0**2)) / (0.5*k*x0**2)
+    print(f"  V2 energy conservation   : drift {d2:.2e}  [{'PASS' if d2<1e-3 else 'FAIL'}]")
+
+    c = 15000.0
+    zeta = c/(2*np.sqrt(k*m)); wd = wn*np.sqrt(1-zeta**2)
+    ts3, xs3, _ = _rk4_free(m, k, c, x0, 0.0, DT, 2.0)
+    ana = x0*np.exp(-zeta*wn*ts3)*(np.cos(wd*ts3)+(zeta/np.sqrt(1-zeta**2))*np.sin(wd*ts3))
+    e3 = np.max(np.abs(xs3 - ana))
+    print(f"  V3 damped vs analytical  : err {e3:.2e} m  [{'PASS' if e3<1e-4 else 'FAIL'}]")
+
+    r = simulate(5000, 0.0, 0, 'medium', 150000, 15000, use_mr=False)
+    a4 = 5000*9.81/r['k_eff']*100
+    print(f"  V4 static eq mg/k_eff    : analytic {a4:.4f} cm, sim {r['x_static_cm']:.4f} cm  "
+          f"[{'PASS' if abs(a4-r['x_static_cm'])<1e-6 else 'FAIL'}]")
+
+    print("  V5 timestep convergence (nominal MR):")
+    for dt_ms in [2.0, 1.0, 0.5, 0.25]:
+        rr = simulate(5000, 3.0, 0, 'medium', 150000, 15000, use_mr=True, dt=dt_ms/1000.0)
+        print(f"       dt={dt_ms:.2f}ms  spring={rr['peak_spring']:.3f}  "
+              f"total={rr['peak_total']:.3f}  disp={rr['peak_disp']:.3f}")
+    print("=" * 62)
+
+
+def cross_check_scipy():
+    try:
+        from scipy.integrate import solve_ivp
+    except ImportError:
+        print("  [cross-check] scipy not installed; skipped.")
+        return
+    mass, sk, surf, c, v0 = 5000.0, 150000.0, 'medium', 15000.0, 3.0
+    kg = SURFACE_K[surf]; k_eff = (sk*kg)/(sk+kg)
+    def rhs(t, y):
+        x, v = y
+        return [v, (-(k_eff*max(0.0, x) + c*v)/mass) + 9.81]
+    sol = solve_ivp(rhs, [0, 1.0], [0.0, v0], max_step=1e-4, rtol=1e-10, atol=1e-12, dense_output=True)
+    tt = np.linspace(0, 1.0, 20000)
+    xx = np.maximum(sol.sol(tt)[0], 0.0)
+    scipy_spring = np.max(k_eff*xx)/1000
+    mine = simulate(5000, v0, 0, surf, 150000, c, use_mr=False)
+    diff = abs(mine['peak_spring'] - scipy_spring)
+    print("=" * 62)
+    print(f"  CROSS-CHECK: RK4 {mine['peak_spring']:.3f} kN vs scipy {scipy_spring:.3f} kN  "
+          f"diff {diff:.4f}  [{'PASS' if diff<0.01 else 'FAIL'}]")
+    print("=" * 62)
+
+
+# PASSIVE COEFFICIENT SWEEP  [FIX 3]
+
+def passive_sweep(velocity=3.0, surface='medium', attitude_deg=0,
+                  c_values=(500, 5000, 15000, 25000, 35000, 46556)):
+    kg = SURFACE_K[surface]
+    k_eff = (150000 * kg) / (150000 + kg)
+    c_crit = 2*np.sqrt(k_eff * 5000)
+    print("=" * 62)
+    print("  PASSIVE COEFFICIENT SWEEP  (nominal 3 m/s, medium)")
+    print("=" * 62)
+    print(f"  {'c':>8} {'zeta':>6} {'spring':>9} {'total':>9} {'disp':>8}")
+    rows = []
+    for c in c_values:
+        p = simulate(5000, velocity, attitude_deg, surface, 150000, 15000,
+                     use_mr=False, c_fixed_override=c)
+        rows.append((c, p['peak_spring'], p['peak_total'], p['peak_disp']))
+        print(f"  {c:>8} {c/c_crit:>6.3f} {p['peak_spring']:>9.2f} "
+              f"{p['peak_total']:>9.2f} {p['peak_disp']:>8.2f}")
+    mr = simulate(5000, velocity, attitude_deg, surface, 150000, 15000, use_mr=True)
+    print(f"  {'MR':>8} {'var':>6} {mr['peak_spring']:>9.2f} "
+          f"{mr['peak_total']:>9.2f} {mr['peak_disp']:>8.2f}")
+    print("=" * 62)
+    return rows
+
+
+# TOTAL-FORCE SCENARIO MATRIX  [FIX 4]
+
+def total_force_matrix():
+    scenarios = [
+        ('S1', 1.5, 0,  'medium'), ('S2', 3.0, 0,  'medium'), ('S3', 6.0, 0,  'medium'),
+        ('S4', 3.0, 0,  'hard'),   ('S5', 3.0, 0,  'soft'),   ('S6', 3.0, 5,  'medium'),
+        ('S7', 3.0, 10, 'medium'), ('S8', 6.0, 10, 'hard'),   ('S9', 8.0, 15, 'hard'),
+    ]
+    print("=" * 88)
+    print("  SCENARIO MATRIX WITH TOTAL FORCE  [FIX 4]  (gravity on)")
+    print("=" * 88)
+    print(f"  {'ID':<4}{'MRspr':>8}{'PAspr':>8}{'RedS%':>7}{'MRtot':>8}{'PAtot':>8}{'RedT%':>8}"
+          f"{'MRdisp':>8}{'PAdisp':>8}")
+    for sid, v, a, s in scenarios:
+        mr = simulate(5000, v, a, s, 150000, 15000, use_mr=True)
+        pa = simulate(5000, v, a, s, 150000, 15000, use_mr=False)
+        rs = (pa['peak_spring']-mr['peak_spring'])/pa['peak_spring']*100
+        rt = (pa['peak_total']-mr['peak_total'])/pa['peak_total']*100
+        print(f"  {sid:<4}{mr['peak_spring']:>8.1f}{pa['peak_spring']:>8.1f}{rs:>7.1f}"
+              f"{mr['peak_total']:>8.1f}{pa['peak_total']:>8.1f}{rt:>8.1f}"
+              f"{mr['peak_disp']:>8.1f}{pa['peak_disp']:>8.1f}")
+    print("=" * 88)
+
+
+def run_revision_analyses():
+    run_validation()
+    cross_check_scipy()
+    total_force_matrix()
+    passive_sweep()
+
