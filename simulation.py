@@ -68,6 +68,9 @@ import matplotlib.ticker as ticker
 from matplotlib.lines import Line2D
 
 
+# PUBLICATION STYLE CONFIGURATION
+# IEEE / AIAA journal standard: white background, black text, serif font,
+# distinguishable line styles rather than color differences.
 
 matplotlib.rcParams.update({
     # Canvas
@@ -187,7 +190,7 @@ def simulate(mass, velocity, attitude_deg, surface, spring_k, c_passive, use_mr,
     vel = v0
 
     times, forces, disps = [], [], []
-    spring_forces = []     
+    spring_forces = []       # NEW: track spring force separately for publication
 
     peak_spring = 0.0
     peak_total  = 0.0
@@ -610,46 +613,17 @@ def plot_all_scenarios(base):
 
 # MAIN
 
-if __name__ == '__main__':
-
-    BASE = dict(
-        mass         = 5_000,    # kg    — effective rocket mass on one leg
-        spring_k     = 150_000,  # N/m   — landing leg spring stiffness
-        c_passive    = 15_000,   # Ns/m  — passive damping coefficient (zeta = 0.274)
-        attitude_deg = 0,        # deg   — nominal = perfectly vertical
-        surface      = 'medium', # str   — nominal = reinforced ground
-        velocity     = 3.0,      # m/s   — nominal landing speed
-    )
-
-    c_crit = 2 * np.sqrt(BASE['spring_k'] * BASE['mass'])
-    c_max  = c_crit * 0.85
-
-    print("=" * 62)
-    print("  MR DAMPER vs PASSIVE DAMPER — ROCKET LANDING SIMULATION")
-    print("=" * 62)
-    print(f"  Mass (m):              {BASE['mass']:>8,} kg")
-    print(f"  Spring stiffness (k):  {BASE['spring_k']:>8,} N/m")
-    print(f"  Critical damping:      {c_crit:>8,.0f} N·s/m  [2*sqrt(k*m)]")
-    print(f"  Passive c:             {BASE['c_passive']:>8,} N·s/m  [zeta = {BASE['c_passive']/c_crit:.3f}]")
-    print(f"  MR c_min:              {500:>8,} N·s/m  [near-zero, rebound phase]")
-    print(f"  MR c_max:              {c_max:>8,.0f} N·s/m  [85% of c_crit]")
-    print(f"  Timestep (DT):         {DT*1000:>8.1f} ms")
-    print(f"  Simulation duration:   {T_MAX:>8.1f} s")
-    print(f"  Data density:          every 3 ms stored (~1,000 pts/curve)")
-    print(f"  Key metric:            Peak spring force k_eff * x")
-    print("=" * 62)
-
-    print("\n[1/2] Running nominal scenario (3 m/s, 0 deg, medium)...")
-    plot_single(BASE, label="Nominal Landing")
-
-    print("\n[2/2] Running all 9 scenarios...")
-    plot_all_scenarios(BASE)
-
-    print("\nDone. Files saved:")
-    print("    result_Nominal_Landing.png       (300 dpi, 4-panel)")
-    print("    result_all_scenarios.png         (300 dpi, 3-panel + table)")
+# ==============================================================================
+# REVISION ANALYSES — added for NHSJS reviewer response
+# All functions below reuse the corrected simulate() above. No separate model.
+#   [FIX 3]   passive coefficient sweep + Pareto data
+#   [FIX 4]   total reaction force already tracked in simulate() (peak_total)
+#   [FIX R8]  analytical validation against closed-form solutions
+#   [FIX R10] timestep convergence check
+# ==============================================================================
 
 
+# VALIDATION: analytical solutions + convergence  [FIX R8 / R10]
 
 def _rk4_free(mass, k, c, x0, v0, dt, t_max):
     # bare linear-oscillator RK4 (no gravity/clamp) for closed-form comparison
@@ -671,7 +645,7 @@ def _rk4_free(mass, k, c, x0, v0, dt, t_max):
 def run_validation():
     sk, surf = 150000.0, 'medium'
     kg = SURFACE_K[surf]
-    m, k = 5000.0, (sk*kg)/(sk+kg)        #
+    m, k = 5000.0, (sk*kg)/(sk+kg)        # k_eff derived, not hardcoded
     wn, x0 = np.sqrt(k/m), 0.1
 
     print("=" * 62)
@@ -707,6 +681,7 @@ def run_validation():
 
 
 def cross_check_scipy():
+    # independent integrator check; confirms the RK4, not just self-consistency
     try:
         from scipy.integrate import solve_ivp
     except ImportError:
@@ -784,3 +759,50 @@ def run_revision_analyses():
     total_force_matrix()
     passive_sweep()
 
+
+# To run the reviewer analyses:
+#   python3 -c "import orig_base as m; m.run_revision_analyses()"
+
+
+if __name__ == '__main__':
+
+    BASE = dict(
+        mass         = 5_000,    # kg    — effective rocket mass on one leg
+        spring_k     = 150_000,  # N/m   — landing leg spring stiffness
+        c_passive    = 15_000,   # Ns/m  — passive damping coefficient (zeta = 0.274)
+        attitude_deg = 0,        # deg   — nominal = perfectly vertical
+        surface      = 'medium', # str   — nominal = reinforced ground
+        velocity     = 3.0,      # m/s   — nominal landing speed
+    )
+
+    c_crit = 2 * np.sqrt(BASE['spring_k'] * BASE['mass'])
+    c_max  = c_crit * 0.85
+
+    print("=" * 62)
+    print("  MR DAMPER vs PASSIVE DAMPER — ROCKET LANDING SIMULATION")
+    print("=" * 62)
+    print(f"  Mass (m):              {BASE['mass']:>8,} kg")
+    print(f"  Spring stiffness (k):  {BASE['spring_k']:>8,} N/m")
+    print(f"  Critical damping:      {c_crit:>8,.0f} N·s/m  [2*sqrt(k*m)]")
+    print(f"  Passive c:             {BASE['c_passive']:>8,} N·s/m  [zeta = {BASE['c_passive']/c_crit:.3f}]")
+    print(f"  MR c_min:              {500:>8,} N·s/m  [near-zero, rebound phase]")
+    print(f"  MR c_max:              {c_max:>8,.0f} N·s/m  [85% of c_crit]")
+    print(f"  Timestep (DT):         {DT*1000:>8.1f} ms")
+    print(f"  Simulation duration:   {T_MAX:>8.1f} s")
+    print(f"  Data density:          every 3 ms stored (~1,000 pts/curve)")
+    print(f"  Key metric:            Peak spring force k_eff * x")
+    print("=" * 62)
+
+    print("\n[1/2] Running nominal scenario (3 m/s, 0 deg, medium)...")
+    plot_single(BASE, label="Nominal Landing")
+
+    print("\n[2/2] Running all 9 scenarios...")
+    plot_all_scenarios(BASE)
+
+
+    print("\n[3/3] Running reviewer-requested analyses (validation, total force, sweep)...")
+    run_revision_analyses()
+
+    print("\nDone. Files saved:")
+    print("    result_Nominal_Landing.png       (300 dpi, 4-panel)")
+    print("    result_all_scenarios.png         (300 dpi, 3-panel + table)")
